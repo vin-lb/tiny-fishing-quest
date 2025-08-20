@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Tiny Fishing Quest</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React 18 + ReactDOM UMD -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Framer Motion UMD -->
+    <script src="https://unpkg.com/framer-motion/dist/framer-motion.umd.js"></script>
+    <!-- Babel for in-browser JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+      html, body { background: #f0f9ff; }
+      /* Prevent long press selection on iOS */
+      * { -webkit-tap-highlight-color: transparent; }
+    </style>
+  </head>
+  <body class="min-h-screen">
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useEffect, useMemo, useRef, useState } = React;
+      const { motion, AnimatePresence } = window["framer-motion"] || {};
+
+      // --- Data Models ---
+      const RODS = [
+        { id: "old-stick", name: "Old Stick", price: 0, tensionForgiveness: 22, castSpeed: 1, durability: 18, rarityBoost: 0 },
+        { id: "willow", name: "Willow Rod", price: 80, tensionForgiveness: 20, castSpeed: 1.15, durability: 22, rarityBoost: 0.02 },
+        { id: "carbon", name: "Carbon Rod", price: 180, tensionForgiveness: 18, castSpeed: 1.25, durability: 26, rarityBoost: 0.04 },
+        { id: "pro", name: "Pro Angler", price: 350, tensionForgiveness: 16, castSpeed: 1.35, durability: 30, rarityBoost: 0.07 },
+      ];
+
+      const LOCATIONS = [
+        {
+          id: "pond", name: "Small Pond", baseDifficulty: 0.85, unlock: { type: "always" },
+          fish: [
+            { id: "minnow", name: "Minnow", value: 2, rarity: 0.58 },
+            { id: "bluegill", name: "Bluegill", value: 4, rarity: 0.32 },
+            { id: "golden-carp", name: "Golden Carp", value: 20, rarity: 0.08, special: "Unlock River Bend" },
+            { id: "old-boot", name: "Old Boot", value: 0, rarity: 0.02, junk: true },
+          ],
+        },
+        {
+          id: "river", name: "River Bend", baseDifficulty: 1.0, unlock: { type: "fishCaught", count: 10 },
+          fish: [
+            { id: "perch", name: "Perch", value: 6, rarity: 0.46 },
+            { id: "trout", name: "Trout", value: 10, rarity: 0.34 },
+            { id: "catfish", name: "Catfish", value: 12, rarity: 0.14 },
+            { id: "opal-salmon", name: "Opal Salmon", value: 34, rarity: 0.06, special: "Unlock Rocky Coast" },
+          ],
+        },
+        {
+          id: "coast", name: "Rocky Coast", baseDifficulty: 1.15, unlock: { type: "coins", amount: 120 },
+          fish: [
+            { id: "mackerel", name: "Mackerel", value: 9, rarity: 0.45 },
+            { id: "sea-bass", name: "Sea Bass", value: 14, rarity: 0.33 },
+            { id: "calico-grouper", name: "Calico Grouper", value: 26, rarity: 0.16 },
+            { id: "starlit-tuna", name: "Starlit Tuna", value: 55, rarity: 0.06, special: "Unlock Midnight Lake" },
+          ],
+        },
+        {
+          id: "midnight", name: "Midnight Lake", baseDifficulty: 1.35, unlock: { type: "special", fishId: "starlit-tuna" },
+          fish: [
+            { id: "shadow-koi", name: "Shadow Koi", value: 28, rarity: 0.42 },
+            { id: "phantom-pike", name: "Phantom Pike", value: 44, rarity: 0.35 },
+            { id: "luminous-arowana", name: "Luminous Arowana", value: 95, rarity: 0.2 },
+            { id: "mythic-whisper", name: "Mythic Whisper", value: 180, rarity: 0.03, special: "Mythic Badge" },
+          ],
+        },
+      ];
+
+      const SAVE_KEY = "tiny-fishing-quest-v1";
+
+      const initialState = {
+        coins: 0,
+        totalCaught: 0,
+        rodId: RODS[0].id,
+        locationId: LOCATIONS[0].id,
+        unlockedLocations: [LOCATIONS[0].id],
+        ownedRods: [RODS[0].id],
+        stamina: RODS[0].durability,
+        badges: [],
+        log: [{ t: Date.now(), msg: "Welcome! Tap CAST to begin." }],
+      };
+
+      const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+
+      function pickFish(table, rarityBoost = 0) {
+        const adjusted = table.map((f, idx) => {
+          if (idx === table.length - 1) {
+            return { ...f, p: Math.max(0, f.rarity + rarityBoost) };
+          }
+          const penalty = rarityBoost / (table.length - 1);
+          return { ...f, p: Math.max(0, f.rarity - penalty) };
+        });
+        let sum = adjusted.reduce((s, f) => s + f.p, 0);
+        if (sum <= 0) sum = 1;
+        const r = Math.random() * sum;
+        let acc = 0;
+        for (const f of adjusted) {
+          acc += f.p;
+          if (r <= acc) return f;
+        }
+        return adjusted[0];
+      }
+
+      function useLocalSave(state, setState) {
+        useEffect(() => {
+          try {
+            const raw = localStorage.getItem(SAVE_KEY);
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              setState((s) => ({ ...s, ...parsed }));
+            }
+          } catch (e) {}
+        }, []);
+        useEffect(() => {
+          try {
+            localStorage.setItem(SAVE_KEY, JSON.stringify(state));
+          } catch (e) {}
+        }, [state]);
+      }
+
+      const TopBar = ({ coins, stamina, maxStamina, rodName, locationName, onReset }) => (
+        <div className="w-full sticky top-0 z-30 bg-sky-50/70 backdrop-blur border-b border-sky-200">
+          <div className="max-w-xl mx-auto px-4 py-3 flex items-center justify-between">
+            <div className="text-sm">
+              <div className="font-semibold">{locationName}</div>
+              <div className="text-xs text-sky-700/70">Rod: {rodName}</div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="text-sm">💰 {coins}</div>
+              <div className="flex items-center gap-1 text-sm">
+                <span>⚡</span>
+                <div className="w-24 h-2 bg-sky-100 rounded-full overflow-hidden">
+                  <div className="h-2 bg-sky-500" style={{ width: `${(stamina / maxStamina) * 100}%` }} />
+                </div>
+              </div>
+              <button onClick={onReset} className="px-2 py-1 text-xs rounded-lg bg-rose-100 text-rose-700 border border-rose-300 active:scale-95">Reset</button>
+            </div>
+          </div>
+        </div>
+      );
+
+      const WaterScene = ({ phase, fishHint, onCast, onShop, onMove, onStats }) => (
+        <div className="relative max-w-xl mx-auto w-full aspect-[9/16] bg-gradient-to-b from-sky-100 to-sky-300 rounded-3xl shadow-xl overflow-hidden select-none">
+          <div className="absolute inset-x-0 top-0 h-1/3 bg-gradient-to-b from-sky-200 to-sky-300" />
+          <div className="absolute inset-x-0 bottom-0 h-2/3 bg-gradient-to-t from-sky-700 to-sky-400" />
+          <div className="absolute -bottom-3 left-0 right-0 h-40 bg-green-300/50 rounded-t-[50%]" />
+          {phase === "idle" && motion && (
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="absolute bottom-28 left-1/2 -translate-x-1/2 text-center text-white">
+              <div className="text-xs opacity-80">Tip: Hold to reel, release to relax tension</div>
+              {fishHint && <div className="mt-1 text-xs opacity-90">Fish are active: {fishHint}</div>}
+            </motion.div>
+          )}
+          <div className="absolute inset-x-0 bottom-4 px-4 flex flex-col gap-2">
+            <button onClick={onCast} className="py-4 rounded-2xl bg-emerald-500 text-white text-xl font-semibold shadow active:scale-95">🎣 CAST</button>
+            <div className="grid grid-cols-3 gap-2 text-sm">
+              <button onClick={onShop} className="py-3 rounded-2xl bg-amber-400/90 text-white font-semibold shadow active:scale-95">🏪 Shop</button>
+              <button onClick={onMove} className="py-3 rounded-2xl bg-indigo-400/90 text-white font-semibold shadow active:scale-95">🗺️ Move</button>
+              <button onClick={onStats} className="py-3 rounded-2xl bg-slate-700/90 text-white font-semibold shadow active:scale-95">📊 Stats</button>
+            </div>
+          </div>
+        </div>
+      );
+
+      const CastingMini = ({ rod, location, onResult, onCancel }) => {
+        const [marker, setMarker] = useState(0);
+        const dirRef = useRef(1);
+        const animRef = useRef(0);
+        const speed = 0.8 * rod.castSpeed * location.baseDifficulty;
+        const zoneCenter = 50;
+        const zoneWidth = 20;
+
+        useEffect(() => {
+          const tick = () => {
+            setMarker((m) => {
+              let next = m + dirRef.current * speed;
+              if (next >= 100) { next = 100; dirRef.current = -1; }
+              else if (next <= 0) { next = 0; dirRef.current = 1; }
+              return next;
+            });
+            animRef.current = requestAnimationFrame(tick);
+          };
+          animRef.current = requestAnimationFrame(tick);
+          return () => cancelAnimationFrame(animRef.current);
+        }, [speed]);
+
+        const inZone = Math.abs(marker - zoneCenter) <= zoneWidth / 2;
+
+        const handleTap = () => {
+          const dist = Math.abs(marker - zoneCenter);
+          const acc = 1 - clamp(dist / (zoneWidth / 2), 0, 1);
+          const power = 0.6 + acc * 0.6;
+          onResult({ success: inZone, power, accuracy: acc });
+        };
+
+        return (
+          <div className="max-w-xl mx-auto w-full aspect-[9/16] bg-slate-900 rounded-3xl shadow-xl overflow-hidden relative">
+            <div className="absolute inset-0 grid place-items-center text-white">
+              <div className="w-72">
+                <div className="text-center mb-3 opacity-80">Tap inside the green zone!</div>
+                <div className="relative h-16 bg-slate-800 rounded-xl overflow-hidden">
+                  <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[20%] bg-emerald-600/30" />
+                  <div className="absolute top-0 bottom-0 w-1 bg-white" style={{ left: `${marker}%` }} />
+                </div>
+              </div>
+              <div className="mt-6 flex gap-3">
+                <button onClick={handleTap} className="px-6 py-4 rounded-xl bg-emerald-500 text-white text-lg font-semibold active:scale-95">LOCK</button>
+                <button onClick={onCancel} className="px-4 py-4 rounded-xl bg-slate-700 text-white text-lg active:scale-95">Cancel</button>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      const ReelingMini = ({ rod, difficulty, onDone, fishName }) => {
+        const [tension, setTension] = useState(50);
+        const [progress, setProgress] = useState(0);
+        const holdRef = useRef(false);
+        const raf = useRef(0);
+
+        const fishPull = 0.45 * difficulty;
+        const reelPull = 0.9;
+        const decay = 0.18;
+        const safeHalf = rod.tensionForgiveness;
+
+        useEffect(() => {
+          const step = () => {
+            setTension((t) => clamp(t + (holdRef.current ? reelPull : -decay) - (Math.random() * fishPull * 2 - fishPull), 0, 100));
+            setProgress((p) => clamp(p + (holdRef.current ? 1.4 : 0.5), 0, 100));
+            raf.current = requestAnimationFrame(step);
+          };
+          raf.current = requestAnimationFrame(step);
+          return () => cancelAnimationFrame(raf.current);
+        }, [difficulty, safeHalf]);
+
+        const inSafe = Math.abs(tension - 50) <= safeHalf;
+
+        useEffect(() => { if (!inSafe) setProgress((p) => clamp(p - 0.6, 0, 100)); }, [inSafe]);
+        useEffect(() => {
+          if (tension <= 1 || tension >= 99) onDone({ broke: true, progress });
+          else if (progress >= 100) onDone({ broke: false, progress: 100 });
+        }, [tension, progress]);
+
+        return (
+          <div className="max-w-xl mx-auto w-full aspect-[9/16] bg-gradient-to-b from-slate-800 to-slate-900 rounded-3xl shadow-xl overflow-hidden relative text-white select-none">
+            <div className="absolute inset-0 p-5 flex flex-col gap-4">
+              <div className="text-center text-lg font-semibold">Reeling… {fishName}</div>
+              <div className="text-center text-xs opacity-80">Hold REEL to pull, release to relax. Keep tension in the safe band.</div>
+              <div className="mt-2">
+                <div className="text-xs mb-1">Tension</div>
+                <div className="relative h-6 bg-slate-700 rounded-full overflow-hidden">
+                  <div className="absolute inset-y-0 bg-emerald-600/25" style={{ left: `${50 - safeHalf}%`, width: `${safeHalf * 2}%` }} />
+                  <div className={`absolute inset-y-0 ${inSafe ? "bg-emerald-500" : "bg-rose-500"}`} style={{ width: `${tension}%` }} />
+                </div>
+              </div>
+              <div className="mt-2">
+                <div className="text-xs mb-1">Catch Progress</div>
+                <div className="h-3 bg-slate-700 rounded-full overflow-hidden">
+                  <div className="h-3 bg-sky-400" style={{ width: `${progress}%` }} />
+                </div>
+              </div>
+              <div className="mt-auto grid grid-cols-1 gap-2">
+                <button
+                  onTouchStart={() => (holdRef.current = true)}
+                  onTouchEnd={() => (holdRef.current = false)}
+                  onMouseDown={() => (holdRef.current = true)}
+                  onMouseUp={() => (holdRef.current = false)}
+                  className="py-5 rounded-2xl bg-emerald-500 text-white text-xl font-semibold active:scale-95"
+                >REEL</button>
+                <div className="text-center text-xs opacity-70">(Tip: Quick taps to center, short holds to win)</div>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      const Modal = ({ open, title, onClose, children }) => (
+        <AnimatePresence>
+          {open && (motion ? (
+            <motion.div className="fixed inset-0 z-40 grid place-items-center bg-black/40" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              <motion.div initial={{ y: 40, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 40, opacity: 0 }} className="w-[92vw] max-w-md bg-white rounded-3xl shadow-2xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="font-semibold text-lg">{title}</div>
+                  <button onClick={onClose} className="px-3 py-1 rounded-lg bg-slate-100 text-slate-700">Close</button>
+                </div>
+                {children}
+              </motion.div>
+            </motion.div>
+          ) : (
+            open && <div className="fixed inset-0 z-40 grid place-items-center bg-black/40">
+              <div className="w-[92vw] max-w-md bg-white rounded-3xl shadow-2xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="font-semibold text-lg">{title}</div>
+                  <button onClick={onClose} className="px-3 py-1 rounded-lg bg-slate-100 text-slate-700">Close</button>
+                </div>
+                {children}
+              </div>
+            </div>
+          ))}
+        </AnimatePresence>
+      );
+
+      const GameLog = ({ items }) => (
+        <div className="max-w-xl mx-auto mt-3 text-[13px] text-slate-700 space-y-1">
+          {items.slice(-6).map((l, i) => (
+            <div key={l.t + i} className="px-3 py-2 bg-white rounded-xl border border-slate-200 shadow-sm">{l.msg}</div>
+          ))}
+        </div>
+      );
+
+      function App() {
+        const [state, setState] = useState(initialState);
+        useLocalSave(state, setState);
+        const rod = useMemo(() => RODS.find((r) => r.id === state.rodId), [state.rodId]);
+        const location = useMemo(() => LOCATIONS.find((l) => l.id === state.locationId), [state.locationId]);
+        const [phase, setPhase] = useState("idle"); // idle | casting | reeling
+        const [shopOpen, setShopOpen] = useState(false);
+        const [moveOpen, setMoveOpen] = useState(false);
+        const [statsOpen, setStatsOpen] = useState(false);
+        const [pendingCatch, setPendingCatch] = useState(null);
+
+        const appendLog = (msg) => setState((s) => ({ ...s, log: [...s.log, { t: Date.now(), msg }] }));
+        const resetRunStamina = () => setState((s) => ({ ...s, stamina: rod.durability }));
+
+        const tryUnlocks = (fishId) => {
+          setState((s) => {
+            const unlocked = new Set(s.unlockedLocations);
+            LOCATIONS.forEach((loc) => {
+              const u = loc.unlock;
+              if (u.type === "always") unlocked.add(loc.id);
+              if (u.type === "fishCaught" && s.totalCaught >= (u.count || 0)) unlocked.add(loc.id);
+              if (u.type === "coins" && s.coins >= (u.amount || 0)) unlocked.add(loc.id);
+              if (u.type === "special" && fishId && fishId === u.fishId) unlocked.add(loc.id);
+            });
+            return { ...s, unlockedLocations: Array.from(unlocked) };
+          });
+        };
+
+        const onCast = () => {
+          if (state.stamina <= 0) { appendLog("You are tired. Tap Stats → Rest to recover."); return; }
+          setPhase("casting");
+        };
+
+        const handleCastResult = ({ success, power, accuracy }) => {
+          if (!success) {
+            appendLog("Splash! Bad cast — the fish got spooked.");
+            setState((s) => ({ ...s, stamina: Math.max(0, s.stamina - 2) }));
+            setPhase("idle");
+            return;
+          }
+          const rarityBoost = rod.rarityBoost + (accuracy * 0.04);
+          const fish = pickFish(location.fish, rarityBoost);
+          setPendingCatch({ fish, power });
+          setPhase("reeling");
+        };
+
+        const handleReelDone = ({ broke, progress }) => {
+          if (broke) {
+            appendLog("Line snapped! The fish got away.");
+            setState((s) => ({ ...s, stamina: Math.max(0, s.stamina - 3) }));
+            setPhase("idle");
+            return;
+          }
+          const fish = pendingCatch.fish;
+          const value = fish.value;
+          const special = fish.special;
+          appendLog(\`Caught a \${fish.name}! +\${value} coins\${special ? \` • Special: \${special}\` : ""}\`);
+          setState((s) => ({
+            ...s,
+            coins: s.coins + value,
+            totalCaught: s.totalCaught + 1,
+            stamina: Math.max(0, s.stamina - 1),
+            badges: special === "Mythic Badge" && !s.badges.includes("Mythic Badge") ? [...s.badges, "Mythic Badge"] : s.badges,
+          }));
+          if (special) tryUnlocks(fish.id); else tryUnlocks();
+          setPendingCatch(null);
+          setPhase("idle");
+        };
+
+        const fishHint = useMemo(() => {
+          const common = location.fish.find((f) => !f.junk)?.name;
+          const rare = location.fish[location.fish.length - 1]?.name;
+          return \`\${common}… maybe a rare \${rare}?\`;
+        }, [location]);
+
+        const buyRod = (id) => {
+          const r = RODS.find((x) => x.id === id);
+          if (state.ownedRods.includes(id)) {
+            setState((s) => ({ ...s, rodId: id, stamina: r.durability }));
+            appendLog(\`Equipped \${r.name}.\`);
+            return;
+          }
+          if (state.coins < r.price) { appendLog("Not enough coins."); return; }
+          setState((s) => ({
+            ...s,
+            coins: s.coins - r.price,
+            ownedRods: [...s.ownedRods, id],
+            rodId: id,
+            stamina: r.durability,
+          }));
+          appendLog(\`Bought & equipped \${r.name}!\`);
+        };
+
+        const canUseLocation = (locId) => state.unlockedLocations.includes(locId);
+        const moveTo = (locId) => { if (!canUseLocation(locId)) return; setState((s) => ({ ...s, locationId: locId })); appendLog(\`Moved to \${LOCATIONS.find((l) => l.id === locId).name}.\`); };
+        const rest = () => { resetRunStamina(); appendLog("You feel refreshed. Stamina restored."); };
+        const resetAll = () => { setState(initialState); setPhase("idle"); };
+
+        const difficulty = useMemo(() => location.baseDifficulty * (1 + Math.min(state.totalCaught, 50) * 0.01), [location, state.totalCaught]);
+
+        return (
+          <div className="min-h-screen w-full bg-sky-50 text-slate-900 pb-20">
+            <TopBar coins={state.coins} stamina={state.stamina} maxStamina={RODS.find(r=>r.id===state.rodId).durability} rodName={RODS.find(r=>r.id===state.rodId).name} locationName={LOCATIONS.find(l=>l.id===state.locationId).name} onReset={resetAll} />
+            <div className="max-w-xl mx-auto p-4">
+              <div className="text-center mb-3">
+                <div className="text-2xl font-bold">Tiny Fishing Quest</div>
+                <div className="text-xs text-slate-600">Tap to fish • Autosaves • Designed for thumbs</div>
+              </div>
+              <AnimatePresence mode="wait">
+                {phase === "idle" && (
+                  <motion.div key="idle" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
+                    <WaterScene phase={phase} fishHint={fishHint} onCast={onCast} onShop={() => setShopOpen(true)} onMove={() => setMoveOpen(true)} onStats={() => setStatsOpen(true)} />
+                  </motion.div>
+                )}
+                {phase === "casting" && (
+                  <motion.div key="casting" initial={{ opacity: 0, x: 40 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -40 }}>
+                    <CastingMini rod={rod} location={location} onResult={handleCastResult} onCancel={() => setPhase("idle")} />
+                  </motion.div>
+                )}
+                {phase === "reeling" && pendingCatch && (
+                  <motion.div key="reeling" initial={{ opacity: 0, x: -40 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 40 }}>
+                    <ReelingMini rod={rod} difficulty={difficulty} onDone={handleReelDone} fishName={pendingCatch.fish.name} />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              <GameLog items={state.log} />
+            </div>
+            <Modal open={shopOpen} title="Tackle Shop" onClose={() => setShopOpen(false)}>
+              <div className="space-y-2">
+                {RODS.map((r) => (
+                  <div key={r.id} className={"p-3 rounded-2xl border " + (state.rodId === r.id ? "border-emerald-400" : "border-slate-200") + " flex items-center justify-between"}>
+                    <div className="text-sm">
+                      <div className="font-semibold">{r.name} {state.rodId === r.id && <span className="text-emerald-600">(Equipped)</span>}</div>
+                      <div className="text-xs text-slate-600">Durability {r.durability} • Cast speed {r.castSpeed} • Forgiveness ±{r.tensionForgiveness}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {!state.ownedRods.includes(r.id) && <div className="text-xs">💰 {r.price}</div>}
+                      <button onClick={() => buyRod(r.id)} className={"px-3 py-2 rounded-xl text-sm font-semibold " + (state.ownedRods.includes(r.id) ? "bg-indigo-100 text-indigo-700" : "bg-emerald-500 text-white")}>
+                        {state.ownedRods.includes(r.id) ? "Equip" : "Buy"}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Modal>
+            <Modal open={moveOpen} title="Choose Location" onClose={() => setMoveOpen(false)}>
+              <div className="space-y-2">
+                {LOCATIONS.map((l) => {
+                  const unlocked = state.unlockedLocations.includes(l.id);
+                  return (
+                    <div key={l.id} className={"p-3 rounded-2xl border " + (state.locationId === l.id ? "border-indigo-400" : "border-slate-200") + " flex items-center justify-between"}>
+                      <div className="text-sm">
+                        <div className="font-semibold">{l.name} {state.locationId === l.id && <span className="text-indigo-600">(Here)</span>}</div>
+                        <div className="text-xs text-slate-600">Difficulty: {l.baseDifficulty.toFixed(2)}</div>
+                        {!unlocked && (<div className="text-[11px] text-rose-600 mt-1">Locked — explore & earn to unlock.</div>)}
+                      </div>
+                      <button disabled={!unlocked} onClick={() => { moveTo(l.id); setMoveOpen(false); }} className={"px-3 py-2 rounded-xl text-sm font-semibold " + (unlocked ? "bg-indigo-500 text-white" : "bg-slate-200 text-slate-400")}>
+                        {unlocked ? "Travel" : "Locked"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </Modal>
+            <Modal open={statsOpen} title="Angler Stats" onClose={() => setStatsOpen(false)}>
+              <div className="space-y-3 text-sm">
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-3 rounded-2xl bg-sky-50 border border-sky-200">Coins: <b>{state.coins}</b></div>
+                  <div className="p-3 rounded-2xl bg-sky-50 border border-sky-200">Total Caught: <b>{state.totalCaught}</b></div>
+                  <div className="p-3 rounded-2xl bg-sky-50 border border-sky-200">Rod: <b>{RODS.find(r=>r.id===state.rodId).name}</b></div>
+                  <div className="p-3 rounded-2xl bg-sky-50 border border-sky-200">Location: <b>{LOCATIONS.find(l=>l.id===state.locationId).name}</b></div>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => { setState((s)=>({ ...s, stamina: RODS.find(r=>r.id===s.rodId).durability })); appendLog("You feel refreshed. Stamina restored."); }} className="px-4 py-2 rounded-xl bg-emerald-500 text-white font-semibold">Rest (restore stamina)</button>
+                  <button onClick={() => { setState(initialState); appendLog("New career started."); }} className="px-4 py-2 rounded-xl bg-rose-100 text-rose-700">New Game</button>
+                </div>
+                {state.badges.length > 0 && (
+                  <div>
+                    <div className="font-semibold mb-1">Badges</div>
+                    <div className="flex flex-wrap gap-2">
+                      {state.badges.map((b, i) => (<div key={i} className="px-3 py-1 rounded-full bg-amber-100 text-amber-700 border border-amber-300 text-xs">🏆 {b}</div>))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </Modal>
+          </div>
+        );
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<App />);
+    </script>
+  </body>
+</html>
